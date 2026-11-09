@@ -158,7 +158,17 @@
   .drop .btn{margin-top:20px}
   .previews{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:30px}
   .pv{position:relative;border-radius:12px;overflow:hidden;aspect-ratio:4/5;background:rgba(255,255,255,.06)}
-  .pv img{width:100%;height:100%;object-fit:cover}
+  .pv img{width:100%;height:100%;object-fit:cover;object-position:50% 32%}
+  .pv.loading::after{
+    content:"painting…";position:absolute;inset:0;display:grid;place-items:center;
+    font-size:.78rem;letter-spacing:.12em;text-transform:uppercase;
+    color:rgba(255,255,255,.85);background:rgba(0,0,0,.34);
+    animation:pulse 1.6s ease-in-out infinite;
+  }
+  .pv.fallback figcaption span:last-child{color:#F0C9A8}
+  @keyframes pulse{0%,100%{opacity:.55}50%{opacity:.95}}
+  .status{min-height:24px;margin:18px 0 0;font-size:.9rem;color:rgba(247,242,231,.82)}
+  .status.err{color:#F3B9A3}
   .pv .wm{
     position:absolute;inset:0;display:grid;place-items:center;pointer-events:none;
     background:repeating-linear-gradient(-38deg,rgba(0,0,0,.09) 0 2px,transparent 2px 14px);
@@ -364,9 +374,9 @@
   <section id="create" class="create">
     <div class="wrap">
       <div class="sec-head">
-        <p class="eyebrow">Try it — nothing leaves this page</p>
-        <h2 style="color:var(--cream)">Drop a photo in. <em style="font-style:italic">See the idea.</em></h2>
-        <p class="lede">This is a working demonstration of the preview step. Your photo is processed entirely in your browser — it is never uploaded anywhere.</p>
+        <p class="eyebrow">Live demonstration — a real generation</p>
+        <h2 style="color:var(--cream)">Drop a photo in. <em style="font-style:italic">Watch it become a portrait.</em></h2>
+        <p class="lede">This is the real thing, not a filter. Your photo goes to our portrait service, comes back as three painted looks in about ten seconds, and is not stored.</p>
       </div>
 
       <label class="drop" id="drop" for="file">
@@ -377,29 +387,31 @@
       </label>
 
       <div class="previews" id="previews" data-empty="1">
-        <figure class="pv" style="margin:0">
-          <img alt="Preview one" data-pv="0">
+        <figure class="pv" style="margin:0" data-style="heritage">
+          <img alt="Heritage portrait preview" data-pv="0">
           <div class="wm"><span>Preview</span></div>
           <figcaption><span>The Heritage</span><span>Free</span></figcaption>
         </figure>
-        <figure class="pv" style="margin:0">
-          <img alt="Preview two" data-pv="1">
+        <figure class="pv" style="margin:0" data-style="mono">
+          <img alt="Monochrome portrait preview" data-pv="1">
           <div class="wm"><span>Preview</span></div>
           <figcaption><span>Studio Mono</span><span>Free</span></figcaption>
         </figure>
-        <figure class="pv" style="margin:0">
-          <img alt="Preview three" data-pv="2">
+        <figure class="pv" style="margin:0" data-style="warm">
+          <img alt="Warm portrait preview" data-pv="2">
           <div class="wm"><span>Preview</span></div>
           <figcaption><span>Warm Portrait</span><span>Free</span></figcaption>
         </figure>
       </div>
+
+      <p class="status" id="status" role="status" aria-live="polite"></p>
 
       <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:26px;align-items:center">
         <a class="btn btn-primary" style="background:#E9C9A8;color:#17150F" href="#keepsakes">Unlock the full resolution — £15</a>
         <button class="btn btn-ghost" id="reset" style="color:var(--cream);border-color:rgba(247,242,231,.35)">Start again</button>
       </div>
 
-      <p class="demo-note">In the live version this is where the portrait is generated — about 20 seconds on a GPU. The three previews above are your own photo with styling applied in the browser, so you can see the mechanic without an account or a card.</p>
+      <p class="demo-note">Your photo is sent to our own portrait service, used once to make these three images, and not kept. Previews carry a watermark; the paid file doesn't. In the live charity version the three free looks are the same call and the print files are produced from the same artwork.</p>
 
       <div class="pricing" id="keepsakes">
         <div class="price-card">
@@ -534,32 +546,89 @@
     });
   });
 
-  // Local-only preview simulation
+  // Real generation against the portrait service
+  var ENDPOINT = 'https://onlinewebstudio.co.uk/portrait-api/generate.php';
+  var STYLES = ['heritage', 'mono', 'warm'];
+  var FALLBACK_FILTER = {
+    heritage: 'sepia(.45) saturate(.85) contrast(1.08) brightness(1.03)',
+    mono: 'grayscale(1) contrast(1.18) brightness(1.04)',
+    warm: 'sepia(.22) saturate(1.25) contrast(1.05)'
+  };
+
   var drop = document.getElementById('drop');
   var input = document.getElementById('file');
   var previews = document.getElementById('previews');
-  var imgs = previews.querySelectorAll('img');
-  var filters = [
-    'sepia(.45) saturate(.85) contrast(1.08) brightness(1.03)',
-    'grayscale(1) contrast(1.18) brightness(1.04)',
-    'sepia(.22) saturate(1.25) contrast(1.05)'
-  ];
+  var statusEl = document.getElementById('status');
+  var tiles = [].slice.call(previews.querySelectorAll('.pv'));
 
-  function load(file) {
-    if (!file || !/^image\//.test(file.type)) return;
-    var reader = new FileReader();
-    reader.onload = function (e) {
-      imgs.forEach(function (img, i) {
-        img.src = e.target.result;
-        img.style.filter = filters[i] || '';
+  function setStatus(msg, isErr) {
+    statusEl.textContent = msg || '';
+    statusEl.classList.toggle('err', !!isErr);
+  }
+
+  function readAsDataUrl(file) {
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function (e) { resolve(e.target.result); };
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+
+  function showImage(i, src, isFallback) {
+    var img = tiles[i].querySelector('img');
+    img.src = src;
+    img.style.filter = isFallback ? (FALLBACK_FILTER[STYLES[i]] || '') : '';
+    tiles[i].classList.remove('loading');
+    tiles[i].classList.toggle('fallback', !!isFallback);
+    var label = tiles[i].querySelector('figcaption span:last-child');
+    if (label) label.textContent = isFallback ? 'Preview unavailable' : 'Free';
+  }
+
+  function one(i, file) {
+    var fd = new FormData();
+    fd.append('photo', file);
+    fd.append('style', STYLES[i]);
+    return fetch(ENDPOINT, { method: 'POST', body: fd })
+      .then(function (r) { return r.json().catch(function () { return { ok: false, error: 'Service returned ' + r.status }; }); })
+      .then(function (j) {
+        if (!j.ok || !j.image) throw new Error(j.error || 'No image returned');
+        showImage(i, j.image, false);
+        return { ok: true, secs: j.secs };
       });
-      previews.setAttribute('data-empty', '0');
-    };
-    reader.readAsDataURL(file);
+  }
+
+  function generate(file) {
+    if (!file || !/^image\//.test(file.type)) { setStatus('That file is not an image.', true); return; }
+    if (file.size > 8 * 1024 * 1024) { setStatus('That photo is over 8MB — try a smaller one.', true); return; }
+
+    tiles.forEach(function (t) { t.classList.add('loading'); t.classList.remove('fallback'); });
+    previews.setAttribute('data-empty', '0');
+    setStatus('Painting three looks — usually about ten seconds…');
+    var started = Date.now();
+
+    Promise.all(STYLES.map(function (_, i) {
+      return one(i, file).catch(function () { return { ok: false }; });
+    })).then(function (results) {
+      var good = results.filter(function (r) { return r.ok; }).length;
+      if (good === 3) {
+        setStatus('Three portraits, ' + Math.round((Date.now() - started) / 100) / 10 + ' seconds.');
+        return;
+      }
+      // Fill any gaps with the local styling stand-in so the demo never looks broken
+      return readAsDataUrl(file).then(function (src) {
+        results.forEach(function (r, i) { if (!r.ok) showImage(i, src, true); });
+        setStatus(good === 0
+          ? 'The portrait service is busy right now — showing a styling stand-in. Try again in a minute.'
+          : good + ' of 3 came back; the rest are styling stand-ins.', true);
+      });
+    }).catch(function () {
+      setStatus('Something went wrong. Try again in a moment.', true);
+    });
   }
 
   drop.addEventListener('click', function (e) { if (e.target.tagName !== 'INPUT') input.click(); });
-  input.addEventListener('change', function (e) { load(e.target.files[0]); });
+  input.addEventListener('change', function (e) { generate(e.target.files[0]); });
   ['dragenter', 'dragover'].forEach(function (ev) {
     drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('hot'); });
   });
@@ -567,12 +636,19 @@
     drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('hot'); });
   });
   drop.addEventListener('drop', function (e) {
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) generate(e.dataTransfer.files[0]);
   });
   document.getElementById('reset').addEventListener('click', function () {
-    imgs.forEach(function (img) { img.removeAttribute('src'); img.style.filter = ''; });
+    tiles.forEach(function (t) {
+      var img = t.querySelector('img');
+      img.removeAttribute('src'); img.style.filter = '';
+      t.classList.remove('loading', 'fallback');
+      var label = t.querySelector('figcaption span:last-child');
+      if (label) label.textContent = 'Free';
+    });
     previews.setAttribute('data-empty', '1');
     input.value = '';
+    setStatus('');
   });
 </script>
 </body>
